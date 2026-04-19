@@ -1,3 +1,5 @@
 /target
 /mutants.out
 /mutants.out.old
+Cargo.lock
+test-data/*

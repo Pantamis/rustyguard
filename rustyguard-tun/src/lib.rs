@@ -5,7 +5,7 @@ use ini::Ini;
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::{CryptoCore, StaticPeerConfig};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, StaticPeerConfig};
 
 pub mod tun;
 
@@ -138,13 +138,43 @@ impl TunConfig {
     }
 }
 
+/// Build a WireGuard session manager and AllowedIPs routing table from raw parameters.
+///
+/// Uses `C::x25519_pubkey` to derive the public key from `private_key`.
+pub fn build_sessions<C: CryptoPrimatives>(
+    private_key: StaticPrivateKey,
+    peers: &[(
+        PublicKey,
+        Option<[u8; 32]>,
+        Option<SocketAddr>,
+        Vec<Ipv4Prefix>,
+    )],
+) -> (Sessions, Ipv4LCTrieMap<PeerId>, Vec<PeerId>) {
+    let mut config = Config::with_crypto::<C>(private_key);
+    let mut peer_ids = Vec::new();
+
+    let mut peer_net = Ipv4RTrieMap::with_root(PeerId::sentinal());
+    for (peer_pk, psk, endpoint, allowed_ips) in peers {
+        let id = config.insert_peer(StaticPeerConfig::new(PublicKey(peer_pk.0), *psk, *endpoint));
+        peer_ids.push(id);
+
+        for prefix in allowed_ips {
+            peer_net.insert(*prefix, id);
+        }
+    }
+    let peer_net = peer_net.compress();
+
+    let sessions = Sessions::new(config, &mut OsRng.unwrap_err());
+    (sessions, peer_net, peer_ids)
+}
+
 pub enum Write<'a> {
     Outbound(&'a [u8], SocketAddr),
     Inbound(&'a [u8]),
     None,
 }
 
-pub fn handle_extern<'a>(
+pub fn handle_extern<'a, C: CryptoPrimatives>(
     sessions: &mut Sessions,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     addr: SocketAddr,
@@ -186,7 +216,7 @@ pub fn handle_extern<'a>(
     Write::None
 }
 
-pub fn handle_intern<'a>(
+pub fn handle_intern<'a, C: CryptoPrimatives>(
     sessions: &mut Sessions,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     reply_buf: &'a mut [u8],

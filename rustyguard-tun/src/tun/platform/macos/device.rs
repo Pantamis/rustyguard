@@ -22,7 +22,23 @@ use std::{
     ptr,
 };
 
+/// Returns the 4-byte TUN protocol header for an IP packet.
+/// Uses libc constants so the values are correct across BSD variants
+/// (AF_INET6 is 30 on macOS, 28 on FreeBSD, 24 on NetBSD).
+fn af_header_for(packet: &[u8]) -> [u8; 4] {
+    let af = if !packet.is_empty() && (packet[0] >> 4) == 6 {
+        libc::AF_INET6 as u32
+    } else {
+        libc::AF_INET as u32
+    };
+    af.to_be_bytes()
+}
+
 /// A TUN device using the TUN macOS driver.
+///
+/// macOS utun devices prepend a 4-byte protocol header to every packet.
+/// This implementation transparently strips the header on read and
+/// prepends it on write, so callers always see raw IP packets.
 pub struct Device {
     pub(crate) name: String,
     pub(crate) queue: Queue,
@@ -148,29 +164,42 @@ impl Device {
     pub fn set_nonblock(&self) -> io::Result<()> {
         self.queue.set_nonblock()
     }
+
+    /// Get the interface name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl Read for Device {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.queue.tun.read(buf)
-    }
-
-    fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
-        self.queue.tun.read_vectored(bufs)
+        // macOS utun prepends a 4-byte protocol header.
+        // Use readv to read header separately, returning only the IP packet.
+        let mut hdr = [0u8; 4];
+        let mut bufs = [io::IoSliceMut::new(&mut hdr), io::IoSliceMut::new(buf)];
+        let n = self.queue.tun.read_vectored(&mut bufs)?;
+        if n <= 4 {
+            return Ok(0);
+        }
+        Ok(n - 4)
     }
 }
 
 impl Write for Device {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.queue.tun.write(buf)
+        // macOS utun expects a 4-byte protocol header before the IP packet.
+        // Detect IPv4 vs IPv6 from the version nibble and use the correct AF.
+        let af = af_header_for(buf);
+        let bufs = [io::IoSlice::new(&af), io::IoSlice::new(buf)];
+        let n = self.queue.tun.write_vectored(&bufs)?;
+        if n <= 4 {
+            return Ok(0);
+        }
+        Ok(n - 4)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.queue.tun.flush()
-    }
-
-    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        self.queue.tun.write_vectored(bufs)
     }
 }
 

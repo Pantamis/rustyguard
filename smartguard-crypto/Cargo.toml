@@ -1,0 +1,12 @@
+[package]
+name = "smartguard-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustyguard-crypto = { workspace = true }
+openpgp-card = { workspace = true }
+card-backend-pcsc = { workspace = true }
+subtle = { workspace = true }
+secrecy = { workspace = true }
+thiserror = { workspace = true }
