@@ -1,5 +1,6 @@
 //! wireguard timers
 
+use rustyguard_crypto::CryptoPrimatives;
 use tai64::Tai64N;
 
 use crate::{
@@ -38,7 +39,7 @@ pub(crate) enum TimerEntryType {
     ExpireTransport { session_id: u32 },
 }
 
-pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
+pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions) -> Option<MaintenanceMsg> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let state = &mut *state_ref;
 
@@ -64,7 +65,7 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                     let socket = peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before");
                     // if this errors, it's due to a key-exchange error (diffie-hellman produced all zeros).
                     // nothign we can really do about that.
-                    if let Ok(hs) = new_handshake(sessions, peer_idx) {
+                    if let Ok(hs) = new_handshake::<C>(sessions, peer_idx) {
                         return Some(MaintenanceMsg {
                             socket,
                             data: MaintenanceRepr::Init(hs),

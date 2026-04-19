@@ -5,7 +5,7 @@ use ini::Ini;
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::StaticPeerConfig;
+use rustyguard_crypto::{CryptoCore, StaticPeerConfig};
 
 pub mod tun;
 
@@ -151,7 +151,7 @@ pub fn handle_extern<'a>(
     ep_buf: &'a mut [u8],
 ) -> Write<'a> {
     // println!("packet from {addr:?}: {:?}", &ep_buf.filled());
-    match sessions.recv_message(addr, ep_buf) {
+    match sessions.recv_message::<CryptoCore>(addr, ep_buf) {
         Err(e) => println!("error: {e:?}"),
         Ok(Message::Noop) => println!("noop"),
         Ok(Message::HandshakeComplete(_encryptor)) => {
@@ -207,7 +207,7 @@ pub fn handle_intern<'a>(
     reply_buf[filled..pad_to].fill(0);
 
     match sessions
-        .send_message(*peer_idx, &mut reply_buf[H..pad_to])
+        .send_message::<CryptoCore>(*peer_idx, &mut reply_buf[H..pad_to])
         .unwrap()
     {
         rustyguard_core::SendMessage::Maintenance(msg) => {

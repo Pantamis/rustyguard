@@ -70,12 +70,12 @@ fn main() {
 
     loop {
         let (n, addr) = endpoint.recv_from(&mut buf.0).unwrap();
-        while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng.unwrap_err()) {
+        while let Some(msg) = sessions.turn::<CryptoCore>(Tai64N::now(), &mut OsRng.unwrap_err()) {
             endpoint.send_to(msg.data(), msg.to()).unwrap();
         }
 
         println!("packet from {addr:?}: {:?}", &buf.0[..n]);
-        match sessions.recv_message(addr, &mut buf.0[..n]) {
+        match sessions.recv_message::<CryptoCore>(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
             Ok(Message::HandshakeComplete(_encryptor)) => {}
@@ -121,7 +121,10 @@ fn main() {
                                         let reply_len = reply.len().next_multiple_of(16);
 
                                         match sessions
-                                            .send_message(peer, &mut inner_reply_buf[..reply_len])
+                                            .send_message::<CryptoCore>(
+                                                peer,
+                                                &mut inner_reply_buf[..reply_len],
+                                            )
                                             .unwrap()
                                         {
                                             rustyguard_core::SendMessage::Maintenance(_) => todo!(),

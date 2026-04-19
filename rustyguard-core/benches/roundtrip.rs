@@ -67,7 +67,10 @@ fn roundtrip_impl(
     let mut msg = black_box(*b"Hello, World!\0\0\0");
 
     // try wrap the message - get back handshake message to send
-    let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
+    let m = match sessions_i
+        .send_message::<CryptoCore>(peer_r, &mut msg)
+        .unwrap()
+    {
         rustyguard_core::SendMessage::Maintenance(m) => m,
         rustyguard_core::SendMessage::Data(_, _) => panic!("expecting handshake"),
     };
@@ -76,7 +79,10 @@ fn roundtrip_impl(
     let response_buf = {
         let handshake_buf = &mut buf.0[..m.data().len()];
         handshake_buf.copy_from_slice(m.data());
-        match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
+        match sessions_r
+            .recv_message::<CryptoCore>(client_addr, handshake_buf)
+            .unwrap()
+        {
             rustyguard_core::Message::Write(buf) => buf,
             _ => panic!("expecting write"),
         }
@@ -84,7 +90,10 @@ fn roundtrip_impl(
 
     // send the handshake response to the client
     let encryptor = {
-        match sessions_i.recv_message(server_addr, response_buf).unwrap() {
+        match sessions_i
+            .recv_message::<CryptoCore>(server_addr, response_buf)
+            .unwrap()
+        {
             rustyguard_core::Message::HandshakeComplete(encryptor) => encryptor,
             _ => panic!("expecting noop"),
         }
@@ -101,7 +110,10 @@ fn roundtrip_impl(
 
     // send the buffer to the server
     {
-        match sessions_r.recv_message(client_addr, data_msg).unwrap() {
+        match sessions_r
+            .recv_message::<CryptoCore>(client_addr, data_msg)
+            .unwrap()
+        {
             rustyguard_core::Message::Read(peer_idx, data) => {
                 assert_eq!(peer_idx, peer_i);
                 assert_eq!(data, b"Hello, World!\0\0\0")

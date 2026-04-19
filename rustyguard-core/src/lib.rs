@@ -32,8 +32,9 @@ use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
-    EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    encrypt_cookie, CookieState, CryptoCore, CryptoError, CryptoPrimatives, DecryptionKey,
+    EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig,
+    StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -116,6 +117,15 @@ impl Config {
         Config {
             static_: StaticInitiatorConfig::new(private_key),
             // TODO(conrad): seed this
+            pubkey_hasher: FixedState::with_seed(0),
+            peers_by_pubkey: HashTable::default(),
+            peers: PeerList(Vec::new()),
+        }
+    }
+
+    pub fn with_crypto<C: CryptoPrimatives>(private_key: StaticPrivateKey) -> Self {
+        Config {
+            static_: StaticInitiatorConfig::with_crypto::<C>(private_key),
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
@@ -365,7 +375,11 @@ impl Sessions {
 
     /// Should be called at least once per second.
     /// Should be called until it returns None.
-    pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
+    pub fn turn<C: CryptoPrimatives>(
+        &self,
+        now: Tai64N,
+        rng: &mut impl CryptoRng,
+    ) -> Option<MaintenanceMsg> {
         let mut state = self.dynamic.borrow_mut();
         if now > state.now {
             state.now = now;
@@ -381,7 +395,7 @@ impl Sessions {
         }
         drop(state);
 
-        time::tick_timers(self)
+        time::tick_timers::<C>(self)
     }
 }
 
@@ -511,7 +525,7 @@ impl Sessions {
         write_msg(buf, &msg)
     }
 
-    pub fn send_message(
+    pub fn send_message<C: CryptoPrimatives>(
         &mut self,
         peer_idx: PeerId,
         payload: &mut [u8],
@@ -548,7 +562,7 @@ impl Sessions {
                 drop(state_ref);
                 Ok(SendMessage::Maintenance(MaintenanceMsg {
                     socket: ep,
-                    data: MaintenanceRepr::Init(new_handshake(self, peer_idx)?),
+                    data: MaintenanceRepr::Init(new_handshake::<C>(self, peer_idx)?),
                 }))
             }
         }
@@ -571,7 +585,7 @@ impl Sessions {
     /// * Any valid messages that could not be decrypted or processed will be reported as [`Error::Rejected`]
     ///
     // TODO(conrad): enforce the msg is 16 byte aligned.
-    pub fn recv_message<'m>(
+    pub fn recv_message<'m, C: CryptoPrimatives>(
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
@@ -588,18 +602,20 @@ impl Sessions {
         let (msg_type, _) =
             little_endian::U32::ref_from_prefix(msg).map_err(|_| Error::InvalidMessage)?;
         match msg_type.get() {
-            MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
-            MSG_SECOND => self.handle_handshake_resp(socket, msg),
+            MSG_FIRST => self
+                .handle_handshake_init::<C>(socket, msg)
+                .map(Message::Write),
+            MSG_SECOND => self.handle_handshake_resp::<C>(socket, msg),
             MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
             MSG_DATA => self
-                .decrypt_packet(socket, msg)
+                .decrypt_packet::<C>(socket, msg)
                 .map(|(id, m)| Message::Read(id, m)),
             _ => Err(Error::InvalidMessage),
         }
     }
 
     #[inline(never)]
-    fn decrypt_packet<'m>(
+    fn decrypt_packet<'m, C: CryptoPrimatives>(
         &self,
         socket: SocketAddr,
         msg: &'m mut [u8],
@@ -637,7 +653,7 @@ impl Sessions {
 
         let payload = ts
             .decrypt
-            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
+            .decrypt::<C>(header.counter.get(), payload_and_tag)?;
 
         Ok((session.peer, payload))
     }
@@ -700,7 +716,10 @@ mod tests {
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
+        let m = match sessions_i
+            .send_message::<CryptoCore>(peer_r, &mut msg)
+            .unwrap()
+        {
             crate::SendMessage::Maintenance(m) => m,
             crate::SendMessage::Data(_, _) => panic!("expecting handshake"),
         };
@@ -709,7 +728,10 @@ mod tests {
         let response_buf = {
             let handshake_buf = &mut buf.0[..m.data().len()];
             handshake_buf.copy_from_slice(m.data());
-            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
+            match sessions_r
+                .recv_message::<CryptoCore>(client_addr, handshake_buf)
+                .unwrap()
+            {
                 crate::Message::Write(buf) => buf,
                 _ => panic!("expecting write"),
             }
@@ -717,7 +739,10 @@ mod tests {
 
         // send the handshake response to the client
         let encryptor = {
-            match sessions_i.recv_message(server_addr, response_buf).unwrap() {
+            match sessions_i
+                .recv_message::<CryptoCore>(server_addr, response_buf)
+                .unwrap()
+            {
                 crate::Message::HandshakeComplete(encryptor) => encryptor,
                 _ => panic!("expecting noop"),
             }
@@ -734,7 +759,10 @@ mod tests {
 
         // send the buffer to the server
         {
-            match sessions_r.recv_message(client_addr, data_msg).unwrap() {
+            match sessions_r
+                .recv_message::<CryptoCore>(client_addr, data_msg)
+                .unwrap()
+            {
                 crate::Message::Read(peer_idx, data) => {
                     assert_eq!(peer_idx, peer_i);
                     assert_eq!(data, b"Hello, World!\0\0\0")
@@ -762,20 +790,23 @@ mod tests {
         let mut config = Config::new(ssk_i);
         let peer_r = config.insert_peer(peer);
         let mut sessions_i = Sessions::new(config, &mut rng);
-        sessions_i.turn(now, &mut rng);
+        sessions_i.turn::<CryptoCore>(now, &mut rng);
 
         let peer = StaticPeerConfig::new(spk_i, Some(psk), Some(client_addr));
         let mut config = Config::new(ssk_r);
         let peer_i = config.insert_peer(peer);
         let mut sessions_r = Sessions::new(config, &mut rng);
-        sessions_r.turn(now, &mut rng);
+        sessions_r.turn::<CryptoCore>(now, &mut rng);
 
         let mut buf = Box::new(AlignedPacket([0; 256]));
 
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
+        let m = match sessions_i
+            .send_message::<CryptoCore>(peer_r, &mut msg)
+            .unwrap()
+        {
             crate::SendMessage::Maintenance(m) => m,
             crate::SendMessage::Data(_, _) => panic!("expecting handshake"),
         };
@@ -786,7 +817,10 @@ mod tests {
         let response_buf = {
             let handshake_buf = &mut buf.0[..m.data().len()];
             handshake_buf.copy_from_slice(m.data());
-            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
+            match sessions_r
+                .recv_message::<CryptoCore>(client_addr, handshake_buf)
+                .unwrap()
+            {
                 crate::Message::Write(buf) => buf,
                 _ => panic!("expecting write"),
             }
@@ -796,7 +830,10 @@ mod tests {
 
         // send the handshake response to the client
         let encryptor = {
-            match sessions_i.recv_message(server_addr, response_buf).unwrap() {
+            match sessions_i
+                .recv_message::<CryptoCore>(server_addr, response_buf)
+                .unwrap()
+            {
                 crate::Message::HandshakeComplete(encryptor) => encryptor,
                 _ => panic!("expecting noop"),
             }
@@ -815,7 +852,10 @@ mod tests {
 
         // send the buffer to the server
         {
-            match sessions_r.recv_message(client_addr, data_msg).unwrap() {
+            match sessions_r
+                .recv_message::<CryptoCore>(client_addr, data_msg)
+                .unwrap()
+            {
                 crate::Message::Read(peer_idx, data) => {
                     assert_eq!(peer_idx, peer_i);
                     assert_eq!(data, b"Hello, World!\0\0\0")

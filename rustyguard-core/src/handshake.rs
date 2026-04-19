@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use rand_core::RngCore;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    CryptoCore, EphemeralPrivateKey, HandshakeState, HasMac,
+    CryptoCore, CryptoPrimatives, EphemeralPrivateKey, HandshakeState, HasMac,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -32,7 +32,7 @@ macro_rules! allocate_session {
 
 impl Sessions {
     #[inline(never)]
-    pub(crate) fn handle_handshake_init<'m>(
+    pub(crate) fn handle_handshake_init<'m, C: CryptoPrimatives>(
         &self,
         addr: SocketAddr,
         msg: &'m mut [u8],
@@ -71,7 +71,7 @@ impl Sessions {
         // start new handshake state.
         let mut hs = HandshakeState::default();
 
-        let data = decrypt_handshake_init(init_msg, &mut hs, &self.config.static_)?;
+        let data = decrypt_handshake_init::<C>(init_msg, &mut hs, &self.config.static_)?;
 
         unsafe_log!("payload decrypted");
         // check if we know this peer
@@ -96,7 +96,7 @@ impl Sessions {
         // complete handshake
         let esk_r = EphemeralPrivateKey::generate(&mut state.rng);
 
-        let response = encrypt_handshake_resp(
+        let response = encrypt_handshake_resp::<C>(
             &mut hs,
             data,
             &esk_r,
@@ -135,7 +135,7 @@ impl Sessions {
     }
 
     #[inline(never)]
-    pub(crate) fn handle_handshake_resp<'m>(
+    pub(crate) fn handle_handshake_resp<'m, C: CryptoPrimatives>(
         &self,
         addr: SocketAddr,
         msg: &'m mut [u8],
@@ -188,7 +188,7 @@ impl Sessions {
         let peer_config = &self.config.peers[session.peer];
         let peer = &mut state.peers[session.peer];
 
-        decrypt_handshake_resp(
+        decrypt_handshake_resp::<C>(
             resp_msg,
             &mut hs.state,
             &self.config.static_,
@@ -257,7 +257,10 @@ impl Sessions {
     }
 }
 
-pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<HandshakeInit, Error> {
+pub(crate) fn new_handshake<C: CryptoPrimatives>(
+    sessions: &Sessions,
+    peer_idx: PeerId,
+) -> Result<HandshakeInit, Error> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let state = &mut *state_ref;
     let peer_config = &sessions.config.peers[peer_idx];
@@ -298,7 +301,7 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<Han
         unreachable!()
     };
 
-    let msg = rustyguard_crypto::encrypt_handshake_init(
+    let msg = rustyguard_crypto::encrypt_handshake_init::<C>(
         &mut handshake.state,
         &sessions.config.static_,
         peer_config,
