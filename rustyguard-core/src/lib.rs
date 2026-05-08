@@ -40,7 +40,7 @@ use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
+    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, DhOracle, EncryptionKey,
     EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
@@ -83,8 +83,8 @@ impl PeerId {
     }
 }
 
-pub struct Config {
-    static_: StaticInitiatorConfig,
+pub struct Config<O: DhOracle = StaticPrivateKey> {
+    static_: StaticInitiatorConfig<O>,
 
     /// This hashtable identifies peers by their public key.
     ///
@@ -120,9 +120,15 @@ impl<P> PeerList<P> {
 }
 
 impl Config {
-    pub fn new(private_key: StaticPrivateKey) -> Self {
+    pub fn new(key: StaticPrivateKey) -> Self {
+        Config::from_oracle(key)
+    }
+}
+
+impl<O: DhOracle> Config<O> {
+    pub fn from_oracle(oracle: O) -> Self {
         Config {
-            static_: StaticInitiatorConfig::new(private_key),
+            static_: StaticInitiatorConfig::from_oracle(oracle),
             // TODO(conrad): seed this
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
@@ -346,8 +352,8 @@ type Tai64NBytes = [u8; 12];
 // and don't need a high-quality hasher
 type SessionMap = HashMap<u32, Box<Session>, FixedState>;
 
-pub struct Sessions {
-    config: Config,
+pub struct Sessions<O: DhOracle = StaticPrivateKey> {
+    config: Config<O>,
     dynamic: RefCell<DynamicState>,
 }
 
@@ -385,6 +391,12 @@ impl DynamicState {
 
 impl Sessions {
     pub fn new(config: Config, rng: &mut impl CryptoRng) -> Self {
+        Self::new_with(config, rng)
+    }
+}
+
+impl<O: DhOracle> Sessions<O> {
+    pub fn new_with(config: Config<O>, rng: &mut impl CryptoRng) -> Self {
         Self {
             dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
             config,
@@ -514,7 +526,7 @@ impl DynamicState {
     }
 }
 
-impl Sessions {
+impl<O: DhOracle> Sessions<O> {
     fn write_cookie_message<'b>(
         &self,
         mac1: Mac,
@@ -691,7 +703,7 @@ mod tests {
         rngs::{OsRng, StdRng},
         Rng, RngCore, SeedableRng, TryRngCore,
     };
-    use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
+    use rustyguard_crypto::{DhOracle, Key, StaticPeerConfig};
     use tai64::Tai64N;
     use zerocopy::IntoBytes;
 
@@ -725,8 +737,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
-        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let spk_i = ssk_i.x25519_pubkey();
+        let spk_r = ssk_r.x25519_pubkey();
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -792,8 +804,8 @@ mod tests {
 
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
-        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let spk_i = ssk_i.x25519_pubkey();
+        let spk_r = ssk_r.x25519_pubkey();
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -850,8 +862,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut rng);
         let ssk_r = gen_sk(&mut rng);
-        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
-        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let spk_i = ssk_i.x25519_pubkey();
+        let spk_r = ssk_r.x25519_pubkey();
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
