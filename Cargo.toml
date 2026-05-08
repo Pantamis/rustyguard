@@ -1,10 +1,28 @@
 [workspace]
 members = [
-    "rustyguard-core",
-    "rustyguard-crypto",
-    "rustyguard-tun",
-    "rustyguard-types",
-    "rustyguard-utils",
-    "wg-proxy",
+  "rustyguard-core",
+  "rustyguard-crypto",
+  "rustyguard-tun",
+  "rustyguard-types",
+  "rustyguard-utils",
+  "wg-proxy",
+  "smartguard-crypto",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+# Forked rustyguard-crypto (generic handshake functions)
+rustyguard-crypto = { path = "rustyguard-crypto" }
+
+# Unmodified upstream crates
+rustyguard-types = { path = "rustyguard-types" }
+rustyguard-utils = { path = "rustyguard-utils" }
+
+# Smartcard
+openpgp-card = "0.6.1"
+card-backend-pcsc = "0.5"
+
+# Utilities
+subtle = "2.6"
+secrecy = "0.10"
+thiserror = "2"
