@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 rustyguard-core = { path = "../rustyguard-core" }
 rustyguard-crypto = { workspace = true }
+rustyguard-tun = { path = "../rustyguard-tun" }
 openpgp-card = { workspace = true }
 card-backend-pcsc = { workspace = true }
 subtle = { workspace = true }

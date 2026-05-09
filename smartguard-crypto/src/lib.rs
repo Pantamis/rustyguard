@@ -13,11 +13,11 @@ mod card;
 use std::net::SocketAddr;
 
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 use rustyguard_core::{Config, PeerId, Sessions};
 use rustyguard_crypto::StaticPeerConfig;
 
-pub use card::{list_cards, CardHandle, CardInfo, SmartcardError};
+pub use card::{CardHandle, CardInfo, SmartcardError, list_cards};
 pub use rustyguard_crypto::{
     CryptoCore, CryptoError, CryptoPrimatives, DhOracle, EphemeralPrivateKey, Key, Mac, PublicKey,
     StaticPrivateKey,
