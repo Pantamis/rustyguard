@@ -8,6 +8,7 @@ publish = false
 rustyguard-core = { version = "0.1", path = "../rustyguard-core" }
 rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
+rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
 rand = "0.9"
 tai64 = "4.0"
@@ -28,4 +29,3 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "time"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.6.4"
 # glommio = "0.9.0"
-

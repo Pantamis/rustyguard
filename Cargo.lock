@@ -821,6 +821,7 @@ dependencies = [
  "rustyguard-core",
  "rustyguard-crypto",
  "rustyguard-types",
+ "rustyguard-utils",
  "tai64",
  "thiserror 2.0.11",
  "tokio",

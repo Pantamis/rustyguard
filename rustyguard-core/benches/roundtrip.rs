@@ -2,11 +2,11 @@ use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
 use rand::{rng, rngs::ThreadRng, RngCore};
-use rustyguard_core::{PublicKey, StaticPrivateKey};
-use rustyguard_crypto::{DhOracle, Key, StaticPeerConfig};
+use rustyguard_core::{PublicKey, Sessions, StaticPrivateKey};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
 use zerocopy::IntoBytes;
 
-use rustyguard_core::{Config, PeerId, Sessions};
+use rustyguard_core::{Config, PeerId, SyncSessions};
 
 fn main() {
     divan::main()
@@ -17,7 +17,7 @@ fn session_with_peer(
     peer_public_key: PublicKey,
     preshared_key: Key,
     endpoint: SocketAddr,
-) -> (Sessions, PeerId) {
+) -> (SyncSessions, PeerId) {
     let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
@@ -42,8 +42,8 @@ fn roundtrip(b: Bencher) {
     b.with_inputs(|| {
         let ssk_i = gen_sk(&mut rng());
         let ssk_r = gen_sk(&mut rng());
-        let spk_i = ssk_i.x25519_pubkey();
-        let spk_r = ssk_r.x25519_pubkey();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         rng().fill_bytes(&mut psk);
         (
@@ -61,8 +61,8 @@ fn roundtrip_impl(
     mut buf: Box<AlignedPacket>,
     server_addr: SocketAddr,
     client_addr: SocketAddr,
-    (mut sessions_i, peer_r): (Sessions, PeerId),
-    (mut sessions_r, peer_i): (Sessions, PeerId),
+    (mut sessions_i, peer_r): (SyncSessions, PeerId),
+    (mut sessions_r, peer_i): (SyncSessions, PeerId),
 ) {
     let mut msg = black_box(*b"Hello, World!\0\0\0");
 
@@ -92,7 +92,7 @@ fn roundtrip_impl(
 
     // wrap the messasge and encode into buffer
     let data_msg = {
-        let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+        let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
         buf.0[..16].copy_from_slice(metadata.header.as_bytes());
         buf.0[16..32].copy_from_slice(&msg);
         buf.0[32..48].copy_from_slice(&metadata.tag.0);
