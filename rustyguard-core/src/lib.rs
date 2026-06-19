@@ -25,7 +25,6 @@ macro_rules! unsafe_log {
 
 extern crate alloc;
 
-use core::cell::RefCell;
 use core::net::SocketAddr;
 use core::time::Duration;
 use core::{hash::BuildHasher, net::IpAddr};
@@ -35,13 +34,13 @@ use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
 use foldhash::fast::FixedState;
-use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
-    EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    encrypt_cookie, AsyncDhOracle, CookieState, CryptoCore, CryptoError, DecryptionKey,
+    EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig,
+    StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -58,6 +57,9 @@ pub use tai64::Tai64N;
 
 mod handshake;
 mod time;
+
+mod sync_wrapper;
+pub use sync_wrapper::*;
 
 /// After sending this many messages, a rekey should take place.
 const REKEY_AFTER_MESSAGES: u64 = 1 << 60; // 2^60
@@ -83,8 +85,8 @@ impl PeerId {
     }
 }
 
-pub struct Config {
-    static_: StaticInitiatorConfig,
+pub struct Config<O = StaticPrivateKey> {
+    static_: StaticInitiatorConfig<O>,
 
     /// This hashtable identifies peers by their public key.
     ///
@@ -120,16 +122,36 @@ impl<P> PeerList<P> {
 }
 
 impl Config {
-    pub fn new(private_key: StaticPrivateKey) -> Self {
+    pub fn new(key: StaticPrivateKey) -> Self {
+        Config::from_oracle(key)
+    }
+}
+
+impl<O: AsyncDhOracle> Config<O> {
+    pub async fn from_oracle_async(oracle: O) -> Self {
         Config {
-            static_: StaticInitiatorConfig::new(private_key),
+            static_: StaticInitiatorConfig::from_oracle_async(oracle).await,
             // TODO(conrad): seed this
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
         }
     }
+}
 
+impl<O: rustyguard_crypto::DhOracle> Config<O> {
+    pub fn from_oracle(oracle: O) -> Self {
+        Config {
+            static_: StaticInitiatorConfig::from_oracle(oracle),
+            // TODO(conrad): seed this
+            pubkey_hasher: FixedState::with_seed(0),
+            peers_by_pubkey: HashTable::default(),
+            peers: PeerList(Vec::new()),
+        }
+    }
+}
+
+impl<O> Config<O> {
     /// Adds a new peer to this wireguard config.
     pub fn insert_peer(&mut self, peer: StaticPeerConfig) -> PeerId {
         use hashbrown::hash_table::Entry;
@@ -305,9 +327,13 @@ pub struct MessageEncrypter(u32);
 impl MessageEncrypter {
     /// Returns `None` if the session has been removed/rotated or has already
     /// crossed REJECT_AFTER_{MESSAGES,TIME} since the encrypter was issued.
-    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> Option<EncryptedMetadata> {
-        let mut state_ref = sessions.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+    pub fn encrypt<S: AsMut<Sessions>>(
+        self,
+        sessions: &mut S,
+        payload: &mut [u8],
+    ) -> Option<EncryptedMetadata> {
+        let sessions = sessions.as_mut();
+        let state = &mut sessions.dynamic;
 
         let now = state.now;
         let session = state.peers_by_session.get_mut(&self.0)?;
@@ -329,7 +355,11 @@ impl MessageEncrypter {
     ///
     /// Returns `false` (with `buffer` left in an unspecified state) if the
     /// session has expired between issuance and use.
-    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) -> bool {
+    pub fn encrypt_and_frame<S: AsMut<Sessions>>(
+        self,
+        sessions: &mut S,
+        buffer: &mut [u8],
+    ) -> bool {
         let len = buffer.len();
         let payload = &mut buffer[16..len - 16];
         let Some(meta) = self.encrypt(sessions, payload) else {
@@ -346,9 +376,15 @@ type Tai64NBytes = [u8; 12];
 // and don't need a high-quality hasher
 type SessionMap = HashMap<u32, Box<Session>, FixedState>;
 
-pub struct Sessions {
-    config: Config,
-    dynamic: RefCell<DynamicState>,
+pub struct Sessions<O = StaticPrivateKey> {
+    config: Config<O>,
+    dynamic: DynamicState,
+}
+
+impl AsMut<Sessions> for Sessions {
+    fn as_mut(&mut self) -> &mut Sessions {
+        self
+    }
 }
 
 pub struct DynamicState {
@@ -383,18 +419,20 @@ impl DynamicState {
     }
 }
 
-impl Sessions {
-    pub fn new(config: Config, rng: &mut impl CryptoRng) -> Self {
+impl<O> Sessions<O> {
+    pub fn new_with(config: Config<O>, rng: &mut impl CryptoRng) -> Self {
         Self {
-            dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
+            dynamic: DynamicState::new(&config.peers, rng),
             config,
         }
     }
+}
 
+impl<O: AsyncDhOracle> Sessions<O> {
     /// Should be called at least once per second.
     /// Should be called until it returns None.
-    pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
-        let mut state = self.dynamic.borrow_mut();
+    pub async fn turn(&mut self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
+        let state = &mut self.dynamic;
         if now > state.now {
             state.now = now;
             if now.duration_since(&state.last_reseed).unwrap() > Duration::from_secs(120) {
@@ -407,9 +445,8 @@ impl Sessions {
                 state.ip_rate_limit.reset(rng);
             }
         }
-        drop(state);
 
-        time::tick_timers(self)
+        time::async_tick_timers(self).await
     }
 }
 
@@ -514,9 +551,9 @@ impl DynamicState {
     }
 }
 
-impl Sessions {
+impl<O> Sessions<O> {
     fn write_cookie_message<'b>(
-        &self,
+        &mut self,
         mac1: Mac,
         receiver: u32,
         cookie: Cookie,
@@ -527,7 +564,7 @@ impl Sessions {
         // This brings us to 500k handshakes processed per second.
         // As I said above, this should be parallisable with an rng per thread.
         let mut nonce = [0u8; 24];
-        self.dynamic.borrow_mut().rng.fill_bytes(&mut nonce);
+        self.dynamic.rng.fill_bytes(&mut nonce);
         let cookie = encrypt_cookie(cookie, &self.config.static_.cookie_key, &nonce, &mac1);
 
         let msg = CookieMessage {
@@ -538,14 +575,15 @@ impl Sessions {
         };
         write_msg(buf, &msg)
     }
+}
 
-    pub fn send_message(
+impl<O: AsyncDhOracle> Sessions<O> {
+    pub async fn send_message(
         &mut self,
         peer_idx: PeerId,
         payload: &mut [u8],
     ) -> Result<SendMessage, Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+        let state = &mut self.dynamic;
 
         let peer = state.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
         let Some(ep) = peer.endpoint else {
@@ -572,13 +610,10 @@ impl Sessions {
             }
             // we could not encrypt the message as we don't yet have an active session.
             // create a handshake init message to be sent.
-            None => {
-                drop(state_ref);
-                Ok(SendMessage::Maintenance(MaintenanceMsg {
-                    socket: ep,
-                    data: MaintenanceRepr::Init(new_handshake(self, peer_idx)?),
-                }))
-            }
+            None => Ok(SendMessage::Maintenance(MaintenanceMsg {
+                socket: ep,
+                data: MaintenanceRepr::Init(handshake::async_new_handshake(self, peer_idx).await?),
+            })),
         }
     }
 
@@ -602,7 +637,7 @@ impl Sessions {
     /// * Any valid messages that could not be decrypted or processed will be reported as [`Error::Rejected`]
     ///
     // TODO(conrad): enforce the msg is 16 byte aligned.
-    pub fn recv_message<'m>(
+    pub async fn recv_message<'m>(
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
@@ -619,8 +654,11 @@ impl Sessions {
         let (msg_type, _) =
             little_endian::U32::ref_from_prefix(msg).map_err(|_| Error::InvalidMessage)?;
         match msg_type.get() {
-            MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
-            MSG_SECOND => self.handle_handshake_resp(socket, msg),
+            MSG_FIRST => self
+                .async_handle_handshake_init(socket, msg)
+                .await
+                .map(Message::Write),
+            MSG_SECOND => self.async_handle_handshake_resp(socket, msg).await,
             MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
             MSG_DATA => self
                 .decrypt_packet(socket, msg)
@@ -628,15 +666,16 @@ impl Sessions {
             _ => Err(Error::InvalidMessage),
         }
     }
+}
 
+impl<O> Sessions<O> {
     #[inline(never)]
     fn decrypt_packet<'m>(
-        &self,
+        &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<(PeerId, &'m mut [u8]), Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+        let state = &mut self.dynamic;
 
         unsafe_log!("[{socket:?}] parsed as data packet");
 
@@ -685,7 +724,7 @@ impl Sessions {
 mod tests {
     use core::net::SocketAddr;
 
-    use crate::{PublicKey, StaticPrivateKey};
+    use crate::{PublicKey, StaticPrivateKey, SyncSessions};
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -708,7 +747,7 @@ mod tests {
         peer_public_key: PublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,
-    ) -> (PeerId, Sessions) {
+    ) -> (PeerId, SyncSessions) {
         let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
         let mut config = Config::new(secret_key);
         let id = config.insert_peer(peer);
@@ -763,7 +802,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -820,7 +859,7 @@ mod tests {
             _ => panic!("expecting handshake complete"),
         };
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -903,7 +942,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);

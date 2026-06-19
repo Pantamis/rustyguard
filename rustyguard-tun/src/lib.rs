@@ -4,8 +4,10 @@ use base64ct::{Base64, Encoding};
 use ini::Ini;
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
-use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::StaticPeerConfig;
+use rustyguard_core::{
+    Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey, SyncSessions,
+};
+use rustyguard_crypto::{AsyncDhOracle, DhOracle, StaticPeerConfig};
 
 use crate::tun::{platform, Device as _, KERNEL_HEADER_LEN};
 
@@ -125,7 +127,7 @@ impl TunConfig {
         private_key
     }
 
-    pub fn build(self) -> (Sessions, Ipv4LCTrieMap<PeerId>) {
+    pub fn build(self) -> (SyncSessions, Ipv4LCTrieMap<PeerId>) {
         let mut rg_config = Config::new(self.key());
 
         let mut peer_net = Ipv4RTrieMap::with_root(PeerId::sentinal());
@@ -156,14 +158,14 @@ pub enum Write<'a> {
     None,
 }
 
-pub fn handle_extern<'a>(
-    sessions: &mut Sessions,
+pub async fn handle_extern_async<'a, O: AsyncDhOracle>(
+    sessions: &mut Sessions<O>,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     addr: SocketAddr,
     ep_buf: &'a mut [u8],
 ) -> Write<'a> {
     // println!("packet from {addr:?}: {:?}", &ep_buf.filled());
-    match sessions.recv_message(addr, ep_buf) {
+    match sessions.recv_message(addr, ep_buf).await {
         Err(e) => println!("error: {e:?}"),
         Ok(Message::Noop) => println!("noop"),
         Ok(Message::HandshakeComplete(_encryptor)) => {
@@ -211,8 +213,8 @@ pub fn handle_extern<'a>(
     Write::None
 }
 
-pub fn handle_intern<'a>(
-    sessions: &mut Sessions,
+pub async fn handle_intern_async<'a, O: AsyncDhOracle>(
+    sessions: &mut Sessions<O>,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     reply_buf: &'a mut [u8],
     filled: usize,
@@ -239,6 +241,7 @@ pub fn handle_intern<'a>(
 
     match sessions
         .send_message(*peer_idx, &mut reply_buf[IP_PACKET_START..pad_to])
+        .await
         .unwrap()
     {
         rustyguard_core::SendMessage::Maintenance(msg) => {
@@ -260,6 +263,36 @@ pub fn handle_intern<'a>(
             Write::Outbound(buf, ep)
         }
     }
+}
+
+use rustyguard_utils::async_convert;
+
+pub fn handle_extern<'a, O: DhOracle>(
+    sessions: &mut SyncSessions<O>,
+    peer_net: &Ipv4LCTrieMap<PeerId>,
+    addr: SocketAddr,
+    ep_buf: &'a mut [u8],
+) -> Write<'a> {
+    async_convert::poll_spin(handle_extern_async(
+        &mut sessions.asynchronous,
+        peer_net,
+        addr,
+        ep_buf,
+    ))
+}
+
+pub fn handle_intern<'a, O: DhOracle>(
+    sessions: &mut SyncSessions<O>,
+    peer_net: &Ipv4LCTrieMap<PeerId>,
+    reply_buf: &'a mut [u8],
+    filled: usize,
+) -> Write<'a> {
+    async_convert::poll_spin(handle_intern_async(
+        &mut sessions.asynchronous,
+        peer_net,
+        reply_buf,
+        filled,
+    ))
 }
 
 /// TODO: replace by max once const stable
